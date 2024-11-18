@@ -1,0 +1,165 @@
+services:
+  mysql:
+    image: mysql
+    restart: always
+    environment:
+      MYSQL_DATABASE: UCC_as2_final
+      MYSQL_ALLOW_EMPTY_PASSWORD: 'true'
+      MYSQL_ROOT_HOST: 'localhost'
+    ports:
+      - "3307:3306"
+    volumes:
+      - "./db_data:/var/lib/mysql"
+    healthcheck:
+      test: [ "CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root" ]
+      timeout: 20s
+      retries: 10
+    networks:
+      - app-network
+  
+  mongo: 
+    image: mongo
+    restart: always
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: root
+      MONGO_INITDB_DATABASE: hotels_list
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongo", "localhost:27017", "--eval", "db.runCommand({ ping: 1 })"]
+      interval: 30s
+      timeout: 10s
+      retries: 30
+    networks:
+      - app-network
+
+  memcached:
+    container_name: cache
+    image: memcached:1.6.16
+    ports:
+      - "11211:11211"
+    healthcheck:
+      test: ["CMD", "memcached-tool", "127.0.0.1:11211", "stats"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    networks:
+      - app-network
+
+  rabbit:
+    container_name: rabbit
+    image: rabbitmq:3-management
+    environment:
+      RABBITMQ_DEFAULT_USER: user
+      RABBITMQ_DEFAULT_PASS: password
+    ports:
+      - "5671:5671"
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: rabbitmq-diagnostics check_port_connectivity
+      interval: 1s
+      timeout: 5s
+      retries: 30
+    networks:
+      - app-network
+
+  solr:
+    container_name: solr
+    image: solr
+    ports:
+      - "8983:8983"
+    volumes:
+      - ./configs/solr/managed-schema:/opt/solr/server/solr/configsets/_default/conf/managed-schema
+    entrypoint:
+      - docker-entrypoint.sh
+      - solr-precreate
+      - hotelSearch
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8983/solr/healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - app-network
+
+  user-res-api:
+    build: user-res-api
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.user-res-api.rule=Host(`localhost`) && PathPrefix(`/user-res-api`)"
+      - "traefik.http.services.user-res-api.loadbalancer.server.port=8081"
+    depends_on:
+      memcached:
+        condition: service_started
+      mysql:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    networks:
+      - app-network
+
+  hotels-api:
+    build: hotels-api
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.hotels-api.rule=Host(`localhost`) && PathPrefix(`/hotels-api`)"
+      - "traefik.http.services.hotels-api.loadbalancer.server.port=8080"
+    depends_on:
+      rabbit:
+        condition: service_healthy
+      mongo:
+        condition: service_started
+    ports:
+      - "8080:8080"
+    networks:
+      - app-network
+
+  search-api:
+    build: search-api
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.search-api.rule=Host(`localhost`) && PathPrefix(`/search-api`)"
+      - "traefik.http.services.search-api.loadbalancer.server.port=8082"
+    depends_on:
+      solr:
+        condition: service_started
+      rabbit:
+        condition: service_healthy
+    ports:
+      - "8082:8082"
+    networks:
+      - app-network
+
+  frontend:
+    build: ./frontend/client
+    environment:
+      VIRTUAL_HOST: localhost
+    depends_on:
+      - search-api
+      - hotels-api
+      - user-res-api
+    ports:
+      - "3000:80"
+    networks:
+      - app-network
+
+
+  traefik:
+    image: traefik:v2.5
+    container_name: traefik
+    command:
+      - "--api.insecure=true"  # Enable Traefik dashboard (not recommended for production)
+      - "--providers.docker=true"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "8084:8084"  # Traefik dashboard
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
